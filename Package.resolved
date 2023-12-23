@@ -1,0 +1,22 @@
+{
+  "pins" : [
+    {
+      "identity" : "bpetokenizer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cayal/BPETokenizer",
+      "state" : {
+        "revision" : "d4cd38e51bcbe8b51a54da4bdf6d8d6d9043aec7"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "c8ed701b513cf5177118a175d85fbbbcd707ab41",
+        "version" : "1.3.0"
+      }
+    }
+  ],
+  "version" : 2
+}
