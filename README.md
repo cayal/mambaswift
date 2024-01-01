@@ -2,6 +2,8 @@
 ## About
 Demonstration of inferencing Albert Gu and Tri Dao's pretrained Mamba models using Apple's MPSGraph.
 
+Also, shoutout to [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal), without which people like me would never be able to delve into these topics. I rag on the slow performance of my code, but I could only implement it at all thanks to that implementation's translation and annotation work.
+
 Usage: 
 ```
 $ cd Mamba/Sources/Demo/Extra

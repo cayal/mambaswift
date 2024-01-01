@@ -415,23 +415,6 @@ struct Mamba: ParsableCommand {
 
 
 class MambaMPSGraph: MPSGraph {
-//    This is the classic discrete state space formula:
-//        x(t + 1) = Ax(t) + Bu(t)
-//        y(t)     = Cx(t) + Du(t)
-//    except B and C (and the step size delta, which is used for discretization) are dependent on the input x(t).
-//
-//    Args:
-//        u: shape (l, d_in)    (See Glossary at top for definitions of l, d_in, n...)
-//        delta: shape (l, d_in)
-//        A: shape (d_in, n)
-//        B: shape (l, n)
-//        C: shape (l, n)
-//        D: shape (d_in,)
-//
-//    Returns:
-//        output: shape (l, d_in)
-    
-    
     func selectiveScan(_ u: MPSGraphTensor,
                        delta: MPSGraphTensor,
                        A: MPSGraphTensor,
@@ -645,44 +628,3 @@ class MambaMPSGraph: MPSGraph {
     
     
 }
-
-//func loadBinaryAsPlainOldArray(binDataPath: String, device: MTLDevice, metadata: MambaLayerMeta) throws -> [[Float32]] {
-//    let rows = metadata.shape[0]
-//    let cols = metadata.shape[1]
-//    guard let data = try? Data(contentsOf: URL(fileURLWithPath: binDataPath)) else {
-//        throw MambaError.invalidFile
-//    }
-//
-//    let totalElements = rows.intValue * cols.intValue
-//    guard data.count >= totalElements * MemoryLayout<Float>.size else {
-//        throw MambaError.incompleteLayer
-//    }
-//
-//    let floatArray = data.withUnsafeBytes { (pointer: UnsafeRawBufferPointer) -> [Float] in
-//        Array(pointer.bindMemory(to: Float.self).prefix(totalElements))
-//    }
-//
-//    return stride(from: 0, to: totalElements, by: cols.intValue).map {
-//        Array(floatArray[$0..<$0 + cols.intValue])
-//    }
-//}
-
-
-//    func getEmbeddings(_ tokens: [Int], cmdBuf: MTLCommandBuffer) -> MPSNDArray? {
-//        var tokenEmbeddings: [MPSNDArray] = []
-//        let descriptor = MPSNDArrayDescriptor(dataType: .float32,
-//                                              shape: [NSNumber(value: tokens.count),
-//                                                      NSNumber(value: embedding.length(ofDimension: 0))])
-//        
-//        for token in tokens {
-//            descriptor.sliceDimension(0, withSubrange: .init(start: token, length: 1))
-//            if let tokenEmbedding = embedding.arrayView(with: cmdBuf, descriptor: descriptor, aliasing: .default) {
-//                tokenEmbeddings.append(tokenEmbedding)
-//            }
-//        }
-//        return embedding.arrayView(
-//            with: cmdBuf,
-//            descriptor: descriptor,
-//            aliasing: .default
-//        )
-//    }
