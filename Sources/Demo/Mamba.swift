@@ -1,193 +1,10 @@
 import ArgumentParser
+import Metal
 import MetalPerformanceShaders
 import MetalPerformanceShadersGraph
 import BPETokenizer
 
-public struct MambaArgs {
-    let dModel: NSNumber = 768
-    let expand: NSNumber = 2
-    let b: NSNumber = 1
-    var dInner: NSNumber { NSNumber(value: Int(truncating: dModel) * Int(truncating: expand)) }
-    let vocabSize = 50280
-    let dConv: NSNumber = 4
-    var dtRank: NSNumber { NSNumber(value: Int(truncating: dModel) / 16) }
-}
-
-struct MambaLayerMeta: Decodable
-{
-    enum CatType: String, Codable { case lm_head, norm_f, layers, embedding }
-    enum RoleType: String, Codable { case norm, mixer }
-    enum KernelType: String, Codable { case conv1d, x_proj, dt_proj, A_log, out_proj, in_proj, D }
-    enum TypeType: String, Codable { case weight, bias, D, A_log }
-    var category: CatType
-    var index: Int?
-    var role: RoleType?
-    var kernel: KernelType?
-    var type: TypeType
-    var shape: [NSNumber]
-    var stride: [Int]
-    
-    enum CodingKeys : String, CodingKey {
-        case category
-        case index
-        case role
-        case kernel
-        case type
-        case shape
-        case stride
-    }
-    init(from decoder: Decoder) throws {
-        let values  = try decoder.container(keyedBy: CodingKeys.self)
-        category    = try values.decode(CatType.self, forKey: .category)
-        index       = try Int(values.decode(String.self, forKey: .index))
-        role        = try? values.decode(RoleType.self, forKey: .role)
-        kernel      = try? values.decode(KernelType.self, forKey: .kernel)
-        type        = try values.decode(TypeType.self, forKey: .type)
-        shape       = try values.decode(Array<Int>.self, forKey: .shape).map({NSNumber(value: $0)})
-        stride      = try values.decode(Array<Int>.self, forKey: .stride)
-    }
-}
-
-struct MambaBlockState
-{
-    typealias Weight = MPSGraphTensorData
-    typealias WeightAndBias = (MPSGraphTensorData, MPSGraphTensorData)
-    var index: Int
-    var D: Weight
-    var inProj: Weight
-    var conv1d: WeightAndBias
-    var xProj: Weight
-    var dtProj: WeightAndBias
-    var ALog: Weight
-    var outProj: Weight
-    var norm: Weight
-}
-
-struct MambaState
-{
-    typealias Weight = MPSGraphTensorData
-    var lmHead: Weight
-    var layers: [MambaBlockState]
-    var embeddings: Weight
-    var normF: Weight
-    
-}
-
-class MambaBlockStateBuilder: Equatable, Hashable
-{
-    static func == (lhs: MambaBlockStateBuilder, rhs: MambaBlockStateBuilder) -> Bool {
-        return lhs.layerNumber == rhs.layerNumber
-    }
-    
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(layerNumber)
-    }
-    
-    typealias Weight = MPSGraphTensorData
-    typealias WeightAndBias = (MPSGraphTensorData?, MPSGraphTensorData?)
-    // typealias WeightAndBias = MPSCNNConvolutionWeightsandBiasesState
-    var layerNumber: Int
-    var D: Weight?
-    var inProj: Weight?
-    var conv1d: WeightAndBias = (nil, nil)
-    var xProj: Weight?
-    var dtProj: WeightAndBias = (nil, nil)
-    var ALog: Weight?
-    var outProj: Weight?
-    var norm: Weight?
-    init(layerNumber: Int) {self.layerNumber = layerNumber}
-    
-    func addTensorData(_ td: MPSGraphTensorData, _ metadata: MambaLayerMeta) throws {
-        switch (metadata.role, metadata.kernel, metadata.type) {
-        case (.norm, _, _):
-            norm = td
-            break
-        case (.mixer, .D, _):
-            D = td
-            break
-        case (.mixer, .A_log, _):
-            ALog = td
-            break
-        case (.mixer, .in_proj, .weight):
-            inProj = td
-            break
-        case (.mixer, .conv1d, .weight):
-            conv1d.0 = td
-            break
-        case (.mixer, .conv1d, .bias):
-            conv1d.1 = td
-            break
-        case (.mixer, .x_proj, .weight):
-            xProj = td
-            break
-        case (.mixer, .dt_proj, .weight):
-            dtProj.0 = td
-            break
-        case (.mixer, .dt_proj, .bias):
-            dtProj.1 = td
-            break
-        case (.mixer, .out_proj, .weight):
-            outProj = td
-            break
-        default:
-            throw MambaError.unknownLayer
-        }
-    }
-    
-    func validated() throws -> MambaBlockState {
-        guard let D = D,
-              let inProj = inProj,
-              let conv1dWeight = conv1d.0,
-              let conv1dBias = conv1d.1,
-              let xProj = xProj,
-              let dtProjWeight = dtProj.0,
-              let dtProjBias = dtProj.1,
-              let ALog = ALog,
-              let outProj = outProj,
-              let norm = norm else {
-            throw MambaError.incompleteLayer
-        }
-        return MambaBlockState(index: layerNumber, D: D, inProj: inProj, conv1d: (conv1dWeight, conv1dBias), xProj: xProj, dtProj: (dtProjWeight, dtProjBias), ALog: ALog, outProj: outProj, norm: norm)
-    }
-}
-
-class MambaStateBuilder
-{
-    typealias Weight = MPSGraphTensorData
-    var lmHead: Weight?
-    private var layerBuilders: Set<MambaBlockStateBuilder> = []
-    var embeddings: Weight?
-    var normF: Weight?
-    init() {}
-    
-    func getLayerBuilder(index:Int) -> MambaBlockStateBuilder {
-        guard let found = layerBuilders.first(where: {$0.layerNumber == index}) 
-        else {
-            let new = MambaBlockStateBuilder(layerNumber: index)
-            layerBuilders.insert(new)
-            return new
-        }
-        return found
-    }
-    
-    func validated() throws -> MambaState {
-        guard let lmHead = lmHead,
-              let embeddings = embeddings,
-              let normF = normF else {
-            throw MambaError.missingEdgeLayers
-        }
-        var builtLayers: [MambaBlockState] = []
-        for layerb in layerBuilders {
-            let built = try layerb.validated()
-            builtLayers.append(built)
-        }
-        return MambaState(lmHead: lmHead, 
-                          layers: builtLayers.sorted(by: {$0.index < $1.index}),
-                          embeddings: embeddings, normF: normF)
-    }
-}
-
-enum MambaError: Error {
+public enum MambaError: Error {
     case invalidFile(String),
          invalidParameterShape(String),
          missingEdgeLayers,
@@ -212,21 +29,32 @@ struct Mamba: ParsableCommand {
     
     
     mutating func run() throws {
-        guard let device = MTLCreateSystemDefaultDevice() else {
+        guard var device = MTLCreateSystemDefaultDevice(),
+        var q = device.makeCommandQueue(),
+        var cmdBuf = q.makeCommandBuffer()
+        else {
             print("Your system does not support Metal.")
-            return
+            throw MambaError.failedToMakeCommandBuffer
         }
+        guard let bundleURL = Bundle.module.url(forResource: "MmMamba", withExtension: "metallib") else {
+            fatalError("Can't find metal library")
+        }
+        let library = try device.makeLibrary(URL: bundleURL)
+        
+        var lmHeadMat: MPSMatrix? = nil
+        var embBuf: MTLBuffer? = nil
         
         // Try enumerating contents of folderUrl
         let contents = try FileManager.default.contentsOfDirectory(atPath: folderUrl).filter({$0 != ".DS_Store"})
+        
         
         let MSB = MambaStateBuilder()
         for cont in contents
         {
             let metadataPath = folderUrl + "/" + cont + "/metadata.json"
             let metadataJson = try String(contentsOfFile: metadataPath)
-            
             let metadata = try JSONDecoder().decode(MambaLayerMeta.self, from: metadataJson.data(using: .utf8)!)
+            
             let binDataPath = folderUrl + "/" + cont + "/weights.bin"
             let buffer = try loadBinaryAsMetalBuffer(binDataPath: binDataPath, device: device, metadata: metadata)
             let tensorData = MPSGraphTensorData(buffer,
@@ -238,12 +66,17 @@ struct Mamba: ParsableCommand {
             switch(metadata.category)
             {
             case .lm_head:
+                lmHeadMat = MPSMatrix(buffer: buffer, descriptor: MPSMatrixDescriptor(rows: 50280,
+                                                                                     columns: 768,
+                                                                                     rowBytes: 768 * MemoryLayout<Float32>.stride,
+                                                                                     dataType: .float32))
                 MSB.lmHead = tensorData
                 print("Loaded LMHead: shape \(tensorData.shape)")
             case .norm_f:
                 MSB.normF = tensorData
                 print("Loaded normF: shape \(tensorData.shape)")
             case .embedding:
+                embBuf = buffer
                 MSB.embeddings = tensorData
                 print("Wrote embeddings: shape \(tensorData.shape)")
             case .layers:
@@ -253,22 +86,44 @@ struct Mamba: ParsableCommand {
             }
         }
         
-        let state = try MSB.validated()
+        
+        
+        var state = try MSB.validated()
+        state.embBuf = embBuf!
         let graph = MambaMPSGraph()
+        let model = MambaRunner(state: state, device: device, cmdQ: q, library: library)
+                
+        print("Prompt: \(promptText)")
         
         // "My name is"
         let specialTokensMapPath = Bundle.module.url(forResource:"special_tokens_map", withExtension:"json")
         let tokenizerPath = Bundle.module.url(forResource:"tokenizer", withExtension:"json")
         let tokenizer = try BPETokenizer(pathToTokenizerConfig: tokenizerPath!, pathToSpecialTokensMap: specialTokensMapPath!)
-        let initialTokens: [Int32] = tokenizer.tokenize(promptText).map { Int32($0.tokenId) }
-        var tokens = initialTokens
-        print("Prompt: \(promptText)")
-        for _ in 0..<tokenCount {
-            tokens = try generate(graph, device:device, state: state, inTokens: tokens)
-            print(tokenizer.unTokenize(tokens))
-        }
+        let initialTokens: [UInt32] = tokenizer.tokenize(promptText).map { UInt32($0.tokenId) }
+        
+        try model.embed(initialTokens, embeddings: embBuf!)
+        
+////        let tokenEmbeddings = model.embed(initialTokens, embeddings: &embBuf!)
+//        
+//        cmdBuf.commit()
+        
+//        *  @abstract   Applies a gather operation along a given axis.  The encoded primary source array
+//        *              contains the data and the secondary array is a 1-D MPSNDArray containing the
+//        *              indices.
+//        *
+//        *                  For each dimension other than axis
+//        *                      result[i] = source[i]; 0 <= i < array slice length along dimension
+//        *                  Along the specified axis
+//        *                      result[i] = source[indices[i]]; 0 <= i < number of indices
+
+//        for _ in 0..<tokenCount {
+//            tokens = try generate(graph, device:device, state: state, inTokens: tokens)
+//            print(tokenizer.unTokenize(tokens))
+//        }
         print("Done")
     }
+    
+    
     
     func generate(_ graph: MambaMPSGraph, device: MTLDevice, state: MambaState, inTokens: [Int32]) throws -> [Int32] {
         var broadTokens = inTokens.map {
@@ -358,63 +213,10 @@ struct Mamba: ParsableCommand {
         return inTokens + [Int32(choose)]
     }
     
-    func loadBinaryAsMetalBuffer(binDataPath: String, device: MTLDevice, metadata: MambaLayerMeta) throws -> MTLBuffer {
-        let url = URL(fileURLWithPath: binDataPath)
-        let fileHandle = try FileHandle(forReadingFrom: url)
-        guard let fileAttributes = try? FileManager.default.attributesOfItem(atPath: url.path()) else {
-            throw MambaError.invalidFile(url.absoluteString)
-        }
-        
-        var data = try fileHandle.readToEnd()
-        defer {
-            fileHandle.closeFile()
-        }
-        
-        var strideBytes = metadata.stride.map {$0 * MemoryLayout<Float32>.stride }
-        guard let dataSize = data?.count,
-              dataSize == metadata.shape.reduce(MemoryLayout<Float32>.size, {$0 * Int($1)}) else {
-            throw MambaError.incompleteLayer
-        }
-        var buf: MTLBuffer? = nil
-        data!.withUnsafeMutableBytes({ (ptr: UnsafeMutableRawBufferPointer) -> Void in
-            buf = device.makeBuffer(bytesNoCopy: ptr.baseAddress!, length: dataSize)
-        })
-        
-        guard let someBuf = buf else {
-            throw MambaError.failedToMakeMetalBuffer
-        }
-        return someBuf
-    }
-    
-    func loadBinaryAsNDArray(binDataPath: String, device: MTLDevice, metadata: MambaLayerMeta) throws -> MPSNDArray {
-        let array = MPSNDArray(device: device, descriptor: MPSNDArrayDescriptor(dataType: .float32, shape: metadata.shape))
-        let url = URL(fileURLWithPath: binDataPath)
-        let fileHandle = try FileHandle(forReadingFrom: url)
-        guard let fileAttributes = try? FileManager.default.attributesOfItem(atPath: url.path()),
-              let fileSize = fileAttributes[.size] as? Int else {
-            throw MambaError.invalidFile(url.absoluteString)
-        }
-        
-        var data = try fileHandle.readToEnd()
-        defer {
-            fileHandle.closeFile()
-        }
-        
-        if(metadata.index == 7) {
-            print("Unlucky 7!")
-        }
-        
-        var strideBytes = metadata.stride.map {$0 * MemoryLayout<Float32>.stride }
-        data!.withUnsafeMutableBytes({ (ptr: UnsafeMutableRawBufferPointer) -> Void in
-            array.writeBytes(ptr.baseAddress!, strideBytes: &strideBytes)
-            print("Array size \(array.resourceSize())")
-        })
-        return array
-    }
 }
 
 
-class MambaMPSGraph: MPSGraph {
+public class MambaMPSGraph: MPSGraph {
     func selectiveScan(_ u: MPSGraphTensor,
                        delta: MPSGraphTensor,
                        A: MPSGraphTensor,
@@ -622,9 +424,127 @@ class MambaMPSGraph: MPSGraph {
         return output
     }
     
-    func embeddingsOf(_ tokens: MPSGraphTensor, within embeddings: MPSGraphTensor) -> MPSGraphTensor {
+    public func embeddingsOf(_ tokens: MPSGraphTensor, within embeddings: MPSGraphTensor) -> MPSGraphTensor {
         return gatherAlongAxis(0, updates: embeddings, indices: tokens, name: "embGather")
     }
     
     
+}
+
+public class MambaRunner {
+    public let state: MambaState
+    public let dModel: Int = 768
+    public let nVocab: Int = 50280
+    public let device: MTLDevice
+    public let commandQueue: MTLCommandQueue
+    public let library: MTLLibrary
+    
+    public init(state: MambaState, device: MTLDevice, cmdQ: MTLCommandQueue, library: MTLLibrary) {
+        self.state = state
+        self.commandQueue = cmdQ
+        self.device = device
+        self.library = library
+    }
+    
+    func printSmokeTest() throws {
+        let kernelFunction = library.makeFunction(name: "smokeTest")!
+        let computePipelineState = try device.makeComputePipelineState(function: kernelFunction)
+        
+        
+        let dataSize = 256 // number of elements
+        guard let buffer = device.makeBuffer(length: dataSize * MemoryLayout<Float>.size, options: []) else {
+            fatalError("Failed to make buffer")
+        }
+        let commandBuffer = commandQueue.makeCommandBuffer()!
+        let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
+        computeEncoder.setComputePipelineState(computePipelineState)
+        computeEncoder.setBuffer(buffer, offset: 0, index: 0)
+        let threadsPerGroup = MTLSize(width: 16, height: 1, depth: 1)
+        let numThreadgroups = MTLSize(width: (dataSize + 15) / 16, height: 1, depth: 1)
+        computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
+        computeEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        var output = [Float]()
+        let dataPointer = buffer.contents().bindMemory(to: Float.self, capacity: dataSize)
+        let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: dataSize)
+        bufferPointer.forEach { value in output.append(value) }
+        print(output)
+        print("Yarg")
+    }
+    
+    public func embed(_ tokenIds: [UInt32], embeddings: MTLBuffer) throws {
+        var nVocab: UInt32 = UInt32(nVocab)
+        let nVb = device.makeBuffer(bytes: &nVocab, length: MemoryLayout<UInt32>.stride)
+        var dModel: UInt32 = UInt32(dModel)
+        let dMb = device.makeBuffer(bytes: &dModel, length: MemoryLayout<UInt32>.stride)
+        
+        
+        var toks: [UInt32] = tokenIds
+        var seqLen: UInt32 = UInt32(toks.count)
+        let sLb = device.makeBuffer(bytes: &seqLen, length: MemoryLayout<UInt32>.stride)
+        
+        let toksTotalBytes = MemoryLayout<UInt32>.stride * toks.count
+        var tokBuf: MTLBuffer? = device.makeBuffer(bytes: toks, length: toksTotalBytes)
+        toks.withUnsafeMutableBytes { tb in
+            print(tb.baseAddress.debugDescription)
+            tokBuf?.contents().copyMemory(from: tb.baseAddress!, byteCount: toksTotalBytes)
+        }
+        guard let tokBuf = tokBuf else {
+            fatalError("Failed to make token buffer")
+        }
+        
+        let embFn = library.makeFunction(name: "getEmbeddings")!
+        let computePipelineState = try device.makeComputePipelineState(function: embFn)
+    //    customScope.begin()
+        let commandBuffer = commandQueue.makeCommandBuffer()!
+        
+        let outBufSize = toks.count * Int(dModel)
+        let outByteCount = outBufSize * MemoryLayout<Float32>.stride
+        var outBuf = device.makeBuffer(length: outByteCount)
+        var output = [Float]()
+        
+        let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
+        computeEncoder.setComputePipelineState(computePipelineState)
+        
+        computeEncoder.setBuffer(tokBuf,  offset: 0, index: 0)
+        computeEncoder.setBuffer(outBuf,  offset: 0, index: 1)
+        computeEncoder.setBuffer(embeddings,  offset: 0, index: 2)
+        computeEncoder.setBuffer(sLb,  offset: 0, index: 3)
+        computeEncoder.setBuffer(nVb,  offset: 0, index: 4)
+        computeEncoder.setBuffer(dMb,  offset: 0, index: 5)
+        
+        //           0  1  2  3  4  5  6  7  8  9  10 11 12 13 14
+        // Example [ ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ?  ? ]
+        let w = computePipelineState.threadExecutionWidth
+        let h = computePipelineState.maxTotalThreadsPerThreadgroup / w
+        let threadsPerThreadgroup = MTLSizeMake(w, h, 1)
+        let threadsPerGrid = MTLSize(width: Int(dModel), height: Int(seqLen), depth: 1)
+        
+        computeEncoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+        computeEncoder.endEncoding()
+        commandBuffer.commit()
+    //    customScope.end()
+    //    let captureManager = MTLCaptureManager.shared()
+    //    captureManager.stopCapture()
+        commandBuffer.waitUntilCompleted()
+        
+        let dataPointer = outBuf!.contents().bindMemory(to: Float.self, capacity: outBufSize)
+        let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: outBufSize)
+        bufferPointer.forEach { value in output.append(value) }
+        print(output)
+        print("Yarg")
+    }
+    
+    
+//    func rmsNorm(_ x: MPSNDArray, weights: MPSMatrix, eps: Double = 1e-5) -> MPSNDArray {
+//        
+//        //        let meanSquare = mean(of: square(with: x, name: "rmsNorm:x^2"), axes: [-1], name: "rmsNorm:mean(x^2)")
+////        let epses = constant(eps, shape: [1], dataType: .float32)
+////        let adjMeanSqu = addition(meanSquare, epses, name:"rmsNorm:mean(x^2)+eps")
+////        let rsqrt = reverseSquareRoot(with: adjMeanSqu, name: "rmsNorm:rsqrt(mean(x^2) + eps)")
+////        let scaledX = multiplication(x, rsqrt, name: "rmsNorm:x * rsqrt(mean(x^2) + eps)")
+////        let output = multiplication(scaledX, weights, name: "rmsNorm:output")
+//        return output
+//    }
 }

@@ -20,8 +20,16 @@ let package = Package(
             exclude: ["./Extra"],
             resources: [
                 .copy("./Resources/special_tokens_map.json"),
-                .copy("./Resources/tokenizer.json")
+                .copy("./Resources/tokenizer.json"),
+                .copy("./Resources/MmMamba.metallib")
             ]
         ),
+        .testTarget(name: "Tests",
+                    dependencies: [.target(name: "Demo")],
+                    resources: [
+                        .copy("./Resources/special_tokens_map.json"),
+                        .copy("./Resources/tokenizer.json"),
+                        .copy("./Resources/MmMamba.metallib")
+                    ])
     ]
 )
