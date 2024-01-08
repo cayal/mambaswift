@@ -152,3 +152,71 @@ public func loadBinaryAsNDArray(binDataPath: String, device: MTLDevice, metadata
     })
     return array
 }
+
+func dumpBuffer<T>(buffer: MTLBuffer, as type: T.Type) -> [T] {
+    let outBufSize = buffer.length / MemoryLayout<T>.stride
+    let dataPointer = buffer.contents().bindMemory(to: type, capacity: outBufSize)
+    let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: outBufSize)
+    var output = [T]()
+    bufferPointer.forEach { value in output.append(value) }
+    return output
+}
+
+func dumpToFile<T>(array: [T], toFilePath path: String) {
+    array.withUnsafeBufferPointer { bp in
+        let data = Data(buffer: bp)
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            print("Data written to file successfully.")
+        } catch {
+            print("Error writing data to file: \(error)")
+        }
+    }
+}
+
+func dumpTensorDataToFile(_ tensorData: MPSGraphTensorData?, _ path: String) {
+    guard let tensorData = tensorData else {
+        print("dumpTensorDataToFile: TensorData is nil")
+        return
+    }
+    let ndArray = tensorData.mpsndarray()
+    let totalCount = tensorData.shape.reduce(1, {$0 * Int(truncating: $1)})
+    let totalBytes = totalCount * MemoryLayout<Float32>.stride
+    var arr: [Float32] = .init(repeating: -99.99, count: totalCount)
+    let data: Data = arr.withUnsafeMutableBufferPointer { ap in
+        ndArray.readBytes(ap.baseAddress!, strideBytes: nil)
+        return Data(bytesNoCopy: ap.baseAddress!, count: totalBytes, deallocator: .none)
+    }
+
+    // Write Data to file
+    do {
+        try data.write(to: URL(fileURLWithPath: path))
+        print("Data written to file successfully.")
+    } catch {
+        print("Error writing data to file: \(error)")
+    }
+}
+
+                    
+func withDebugCapture<T>(on device: MTLDevice, execute closure: () throws -> T) rethrows -> T {
+    let sharedCapturer = MTLCaptureManager.shared()
+    let customScope = sharedCapturer.makeCaptureScope(device: device)
+    customScope.label = "Pls fix it"
+    sharedCapturer.defaultCaptureScope = customScope
+
+    let captureDescriptor = MTLCaptureDescriptor()
+    captureDescriptor.captureObject = device
+    do {
+        try sharedCapturer.startCapture(with: captureDescriptor)
+    } catch {
+        fatalError("Failed to capture: \(error)")
+    }
+    customScope.begin()
+
+    let result = try closure()
+
+    customScope.end()
+    sharedCapturer.stopCapture()
+
+    return result
+}
