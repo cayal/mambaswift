@@ -3,10 +3,14 @@ import Metal
 import MetalPerformanceShaders
 import MetalPerformanceShadersGraph
 import BPETokenizer
+import MamBufLo
 
 public enum MambaError: Error {
     case invalidFile(String),
+         unsupportedModel(String),
+         invalidParameter(String),
          invalidParameterShape(String),
+         missingData(String),
          missingEdgeLayers,
          incompleteLayer,
          unknownLayer,
@@ -14,13 +18,14 @@ public enum MambaError: Error {
          failedToMakeCommandBuffer,
          failedToMakeCommandEncoder,
          failedToMakeMetalBuffer,
+         failedToMakeMetalHeap,
          embeddingNotFound
 }
 
 @main
 struct Mamba: ParsableCommand {
     @Argument(help: "The folder containing exploded layer weights")
-    var folderUrl: String
+    var folderUrl: String?
 
     @Option(name: .shortAndLong, help: "Prompt text")
     var promptText: String = "Happy New"
@@ -30,6 +35,8 @@ struct Mamba: ParsableCommand {
     
     
     mutating func run() throws {
+        let SupportedModels: [any ModelStateSpec] = [OG130()]
+        
         guard var device = MTLCreateSystemDefaultDevice(),
         var q = device.makeCommandQueue(),
         var cmdBuf = q.makeCommandBuffer()
@@ -45,268 +52,304 @@ struct Mamba: ParsableCommand {
         var lmHeadMat: MPSMatrix? = nil
         var embBuf: MTLBuffer? = nil
         
-        // Try enumerating contents of folderUrl
-        let contents = try FileManager.default.contentsOfDirectory(atPath: folderUrl).filter({$0 != ".DS_Store"})
+        let furl = try folderUrl ?? {
+            print("No folder url specified, looking for converted models...")
+            guard let convertedModelsPath = Bundle.module.url(forResource: "converted", withExtension: nil)?.path,
+                  let availableModels = try? FileManager.default.contentsOfDirectory(atPath: convertedModelsPath).filter({$0 != ".DS_Store"}),
+                  availableModels.count > 0 else {
+                print("Couldn't find a model to use. Specify a folder URL or convert a model with `convert.py`.")
+                throw MambaError.invalidFile("")
+            }
+            guard let foundName = availableModels.first(where: { avail in SupportedModels.first(where: { $0.name == avail }) != nil }) else {
+                print("Supported models are: \(SupportedModels.map{$0.name}.joined(separator: ", ")). Found: \(availableModels.joined(separator: ","))")
+                throw MambaError.invalidFile("")
+            }
+            return convertedModelsPath + "/" + foundName
+        }()
+        
+        // Double check this one more time lol
+        let chosenName = furl.split(separator: "/").last ?? ""
+        guard let modelToUse = SupportedModels.first(where: { $0.name ==  chosenName }) else {
+            print("Passed: \(chosenName). Supported models are: \(SupportedModels.map{$0.name}.joined(separator: ", ")).")
+            throw MambaError.invalidFile(furl)
+        }
+        
+        let contents = try FileManager.default.contentsOfDirectory(atPath: furl).filter({$0 != ".DS_Store"})
+        print("Oh no")
         
         
         let MSB = MambaStateBuilder()
+        let MBL = try MamBufLoBuilder(modelToUse)
+        
         for cont in contents
         {
-            let metadataPath = folderUrl + "/" + cont + "/metadata.json"
+            let metadataPath = furl + "/" + cont + "/metadata.json"
             let metadataJson = try String(contentsOfFile: metadataPath)
-            let metadata = try JSONDecoder().decode(MambaLayerMeta.self, from: metadataJson.data(using: .utf8)!)
+//            let metadata = try JSONDecoder().decode(MambaLayerMeta.self, from: metadataJson.data(using: .utf8)!)
+            let metadata = try JSONDecoder().decode(InputMetadata.self, from: metadataJson.data(using: .utf8)!)
+            let binDataPath = furl + "/" + cont + "/weights.bin"
+            //MSB.addState(metadata, binDataPath)
+            try MBL.include(metadata, pathOnDisk: binDataPath)
             
-            let binDataPath = folderUrl + "/" + cont + "/weights.bin"
-            let buffer = try loadBinaryAsMetalBuffer(binDataPath: binDataPath, device: device, metadata: metadata)
-            let tensorData = MPSGraphTensorData(buffer,
-                                                shape: metadata.shape,
-                                                dataType: .float32,
-                                                rowBytes: MemoryLayout<Float32>.size * Int(exactly: metadata.shape.last!)!)
-
-            
-            switch(metadata.category)
-            {
-            case .lm_head:
-                lmHeadMat = MPSMatrix(buffer: buffer, descriptor: MPSMatrixDescriptor(rows: 50280,
-                                                                                     columns: 768,
-                                                                                     rowBytes: 768 * MemoryLayout<Float32>.stride,
-                                                                                     dataType: .float32))
-                MSB.lmHead = tensorData
-                print("Loaded LMHead: shape \(tensorData.shape)")
-            case .norm_f:
-                MSB.normF = tensorData
-                print("Loaded normF: shape \(tensorData.shape)")
-            case .embedding:
-                embBuf = buffer
-                MSB.embeddings = tensorData
-                print("Wrote embeddings: shape \(tensorData.shape)")
-            case .layers:
-                let lb = MSB.getLayerBuilder(index: metadata.index!)
-                try lb.addTensorData(tensorData, metadata)
-                print("Loaded \(cont): shape \(tensorData.shape) -> \(previewFloatTensorBytes(tensorData, offset: 0, n: 2))...")
-            }
+//            let buffer = try loadBinaryAsMetalBuffer(binDataPath: binDataPath, device: device, metadata: metadata)
+//            let tensorData = MPSGraphTensorData(buffer,
+//                                                shape: metadata.shape,
+//                                                dataType: .float32,
+//                                                rowBytes: MemoryLayout<Float32>.size * Int(exactly: metadata.shape.last!)!)
+//
+//            
+//            switch(metadata.category)
+//            {
+//            case .lm_head:
+//                lmHeadMat = MPSMatrix(buffer: buffer, descriptor: MPSMatrixDescriptor(rows: 50280,
+//                                                                                     columns: 768,
+//                                                                                     rowBytes: 768 * MemoryLayout<Float32>.stride,
+//                                                                                     dataType: .float32))
+//                MSB.lmHead = tensorData
+//                print("Loaded LMHead: shape \(tensorData.shape)")
+//            case .norm_f:
+//                MSB.normF = tensorData
+//                print("Loaded normF: shape \(tensorData.shape)")
+//            case .embedding:
+//                embBuf = buffer
+//                MSB.embeddings = tensorData
+//                print("Wrote embeddings: shape \(tensorData.shape)")
+//            case .layers:
+//                let lb = MSB.getLayerBuilder(index: metadata.index!)
+//                try lb.addTensorData(tensorData, metadata)
+//                print("Loaded \(cont): shape \(tensorData.shape) -> \(previewFloatTensorBytes(tensorData, offset: 0, n: 2))...")
+//            }
         }
         
         
         
-        var state = try MSB.validated()
-        state.embBuf = embBuf!
-        let graph = MambaMPSGraph()
+        var state = try MBL.complete(device: device, cmdQ: q)
         let model = MambaRunner(state: state, device: device, cmdQ: q, library: library)
+        
+//        var state = try MB.validated()
+//        state.embBuf = embBuf!
+//        let graph = MambaMPSGraph()
                 
         print("Prompt: \(promptText)")
         
-        // "My name is"
+//         "My name is"
         let specialTokensMapPath = Bundle.module.url(forResource:"special_tokens_map", withExtension:"json")
         let tokenizerPath = Bundle.module.url(forResource:"tokenizer", withExtension:"json")
         let tokenizer = try BPETokenizer(pathToTokenizerConfig: tokenizerPath!, pathToSpecialTokensMap: specialTokensMapPath!)
         var tokens: [Int32] = tokenizer.tokenize(promptText).map { Int32($0.tokenId) }
+        var embeddings = try model.embed(tokens)
         
         cmdBuf.commit()
-        for _ in 0..<tokenCount {
-//            tokens = try generate(graph, device:device, state: state, inTokens: tokens)
-            let embeddings = try model.embed(tokens, embeddings: state.embBuf!)
-            let embMatrix  = MPSMatrix(buffer: embeddings, descriptor: MPSMatrixDescriptor(rows: tokens.count,
-                                                                                           columns: model.dModel,
-                                                                                           rowBytes: model.dModel * MemoryLayout<Float32>.stride,
-                                                                                           dataType: .float32))
-            let embTnData = MPSGraphTensorData(embMatrix)
-            let embPlaceh = graph.placeholder(shape: embTnData.shape, dataType: .float32, name: "embPlaceh")
-            let operands = state.layers.map { layerState in MambaBlockOperand(state: layerState, graph: graph) }
-            var xp: MPSGraphTensor = embPlaceh
-            var x: MPSGraphTensorData = embTnData
-            let margs    = MambaArgs()
-            for layer in operands {
-                let norm  = graph.rmsNorm(xp, weights: layer.norm.key)
-                // .shape: (l, d)
-                guard let l = norm.shape?[0], let _ = norm.shape?[1] else {
-                    throw MambaError.invalidParameterShape("mamba/norm@\(layer.index)")
-                }
-                
-                /// Projection of shape (l, 2(dInner)), where left is x and right is residual
-                let normAndRes = graph.matrixMultiplication(primary: norm,
-                                                            secondary: graph.transposeTensor(layer.inProj.key,
-                                                                                             dimension: 0,
-                                                                                             withDimension: 1,
-                                                                                             name: "mamba:normAndRes.transpose@\(layer.index)"),
-                                                            name: "mamba:normAndRes.matmul@\(layer.index)")
-                
-                let normrSplit = graph.split(normAndRes, splitSizes: [margs.dInner, margs.dInner], axis: -1, name: "mamba:normrSplit.split@\(layer.index)")
-                let x2   = normrSplit[0] // (l, dInner)
-                let res = normrSplit[1] // (l, dInner)
-                
-                let results = try genToselScan(graph,
-                                               model: model,
-                                               device: device,
-                                               state: state,
-                                               inTokens: tokens,
-                                               layer: layer,
-                                               x2: x2,
-                                               res: res,
-                                               l: l,
-                                               xp: xp,
-                                               x: x,
-                                               margs: margs
-                )
-                
-                let nextCmdBuf = q.makeCommandBuffer()!
-                let und = results[0].mpsndarray()
-                let spdnd = results[1].mpsndarray()
-                let and = results[2].mpsndarray()
-                let bnd = results[3].mpsndarray()
-                let cnd = results[4].mpsndarray()
-                let dnd = results[5].mpsndarray()
-                var u = device.makeBuffer(length: und.resourceSize())!
-                var spd = device.makeBuffer(length: spdnd.resourceSize())!
-                var a = device.makeBuffer(length: and.resourceSize())!
-                var b = device.makeBuffer(length: bnd.resourceSize())!
-                var c = device.makeBuffer(length: cnd.resourceSize())!
-                var d = device.makeBuffer(length: dnd.resourceSize())!
-                und.exportData(with: nextCmdBuf, to: u, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                spdnd.exportData(with: nextCmdBuf, to: spd, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                and.exportData(with: nextCmdBuf, to: a, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                bnd.exportData(with: nextCmdBuf, to: b, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                cnd.exportData(with: nextCmdBuf, to: c, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                dnd.exportData(with: nextCmdBuf, to: d, destinationDataType: .float32, offset: 0, rowStrides: nil)
-                nextCmdBuf.commit()
-                nextCmdBuf.waitUntilCompleted()
-                
-                let selScanFn = library.makeFunction(name: "selectiveScan")!
-                let computePipelineState = try device.makeComputePipelineState(function: selScanFn)
-                var dInner = UInt32(1536)
-                var dState = UInt32(16)
-                let seqLen = UInt32(tokens.count)
-                let outBufSize = dInner * seqLen
-                let outByteCount = Int(outBufSize) * MemoryLayout<Float32>.stride
-                let outBuf = device.makeBuffer(length: outByteCount)
-                var output = [Float]()
-                
-                let xBufSize = dInner * (dState / 4)
-                let xByteCount = Int(xBufSize) * MemoryLayout<SIMD4<Float>>.stride
-                var xBuf = device.makeBuffer(length: xByteCount)
-                
-                let dInnerB = device.makeBuffer(bytes: &dInner, length: MemoryLayout<UInt32>.stride)
-                let dStateB = device.makeBuffer(bytes: &dState, length: MemoryLayout<UInt32>.stride)
-                
-                //            withDebugCapture(on: device, execute:  {
-                var computeCmdBuf = q.makeCommandBuffer()!
-                var computeEncoder = computeCmdBuf.makeComputeCommandEncoder(dispatchType: .serial)!
-                computeEncoder.setComputePipelineState(computePipelineState)
-                
-                var loopIndices: [UInt32] = [0, 1]
-                let liB = device.makeBuffer(bytes: &loopIndices, length: loopIndices.count * MemoryLayout<UInt32>.stride)
-                computeEncoder.setBuffer(u,  offset: 0, index: 0)
-                computeEncoder.setBuffer(spd,  offset: 0, index: 1)
-                computeEncoder.setBuffer(a,  offset: 0, index: 2)
-                computeEncoder.setBuffer(b,  offset: 0, index: 3)
-                computeEncoder.setBuffer(c,  offset: 0, index: 4)
-                computeEncoder.setBuffer(d,  offset: 0, index: 5)
-                computeEncoder.setBuffer(liB,  offset: 0, index: 6)
-                computeEncoder.setBuffer(dInnerB,  offset: 0, index: 7)
-                computeEncoder.setBuffer(dStateB,  offset: 0, index: 8)
-                computeEncoder.setBuffer(xBuf,    offset: 0, index: 9)
-                computeEncoder.setBuffer(outBuf,  offset: 0, index: 10)
-                
-                for li in loopIndices.map({Int($0)}) {
-                    computeEncoder.setBufferOffset(4 * li * Int(dInner), index: 0)
-                    computeEncoder.setBufferOffset(4 * li * Int(dInner), index: 1)
-                    computeEncoder.setBufferOffset(4 * li * Int(dState), index: 3)
-                    computeEncoder.setBufferOffset(4 * li * Int(dState), index: 4)
-                    computeEncoder.setBufferOffset(4 * li, index: 6)
-                    let h = computePipelineState.threadExecutionWidth
-                    let w = 1
-                    let threadsPerThreadgroup = MTLSizeMake(w, h, 1)
-                    let threadsPerGrid = MTLSize(width: Int(dInner), height: Int(dState), depth: 1)
-                    computeEncoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
-                }
-                
-                computeEncoder.endEncoding()
-                computeCmdBuf.commit()
-                computeCmdBuf.waitUntilCompleted()
-                //            })
-                
-                let yPlaceholder = graph.placeholder(shape: [NSNumber(value: seqLen), NSNumber(value: dInner)], dataType: .float32, name: "yPlaceh")
-                let yTensorData = MPSGraphTensorData(outBuf!, shape: [NSNumber(value: seqLen), NSNumber(value: dInner)], dataType: .float32)
-                
-                let yup = graph.multiplication(yPlaceholder, graph.silu(res), name:nil)
-                
-                
-                /// Projection of shape (l, 2(dInner)), where left is x and right is residual
-                let hmmmm = graph.matrixMultiplication(primary: yup,
-                                                       secondary: graph.transposeTensor(layer.outProj.key,
-                                                                                        dimension: 0,
-                                                                                        withDimension: 1,
-                                                                                        name: "mamba:output.transpose@\(layer.index)"),
-                                                       name: "mamba:output.matmul@\(layer.index)")
-                
-                let residual = graph.addition(hmmmm, xp, name: "residual:+@\(layer.index)")
-                let layerResults = graph.run(feeds: [yPlaceholder:yTensorData,
-                                                        xp:x
-                                                    ].merging(operands.flatMap({$0.feeds}), uniquingKeysWith: {$1}),
-                                             targetTensors: [residual],
-                                             targetOperations: nil)
-                x = layerResults[residual]!
-            }
-            
-            let vocEmbP = graph.placeholder(shape: state.embeddings.shape, dataType: .float32, name: "vocEmbP")
-            let normFPlaceholder  = graph.placeholder(shape: state.normF.shape, dataType: .float32, name: "normFP")
-            let laysors = graph.placeholder(shape: [NSNumber(value:tokens.count),NSNumber(value: model.dModel)], name: nil)
-            let normFoo = graph.rmsNorm(laysors, weights: normFPlaceholder)
-            let logits  = graph.matrixMultiplication(primary: normFoo,
-                                                     secondary: graph.transposeTensor(vocEmbP, dimension: 0, withDimension:1, name: "logits.transpose"),
-                                                     name: "logits.matmul")
-            let probs   = graph.softMax(with:
-                                        graph.sliceTensor(logits,
-                                                          dimension: 0,
-                                                          start: Int(truncating: logits.shape![0]) - 1,
-                                                          length: 1,
-                                                          name:nil),
-                                      axis: -1,
-                                      name: nil)
-            
-            print("Sampling...")
-            let results = graph.run(
-                feeds: [laysors:x,
-                        vocEmbP:state.embeddings,
-                        normFPlaceholder:state.normF,
-                       ].merging(operands.flatMap({$0.feeds}), uniquingKeysWith: {$1}),
-                targetTensors: [probs],
-                targetOperations: nil
-            )
-            
-            peekFloatTensorFloats(results[probs])
-            let arr = results[probs]!.mpsndarray()
-            let totalSize = (0..<arr.numberOfDimensions)
-                .reduce(into: 1, {$0 *= arr.length(ofDimension: $1)})
-            
-            
-            var values: [Float32] = .init(repeating: -42.0, count: totalSize)
-            arr.readBytes(&values, strideBytes: nil)
-            var tokenProbs: [(Int, Float32)] = Array(values.enumerated()
-                .map{ (i, v) in v.isNaN ? (i, 0) : (i, v) }
-                .sorted(by: {$0.1 > $1.1})
-                .prefix(40))
-            
-            
-            // Sum of all probabilities (so that we don't have to require that the sum is 1.0):
-            let sum = tokenProbs.reduce(0, {(a, v) in a + v.1})
-            // Random number in the range 0.0 <= rnd < sum :
-            let rnd = Float32.random(in: 0.0 ..< sum)
-            var choose = tokenProbs.count - 1
-            
-            // Find the first interval of accumulated probabilities into which `rnd` falls:
-            var accum: Float32 = 0.0
-            for (i, p) in tokenProbs.enumerated() {
-                accum += p.1
-                if rnd < accum {
-                    choose = i
-                    break
-                }
-            }
-            let choice = tokenProbs[choose].0
-            tokens = tokens + [Int32(choice)]
-            print(tokenizer.unTokenize(tokens))
-        }
+        var embOut: [Float16] = []
+        let dataPointer = embeddings.contents().bindMemory(to: Float16.self, capacity: embeddings.length)
+        let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: embeddings.length)
+        bufferPointer.forEach { value in embOut.append(value) }
+        print(embOut)
+
+//        for _ in 0..<tokenCount {
+////            tokens = try generate(graph, device:device, state: state, inTokens: tokens)
+//            let embeddings = try model.embed(tokens, embeddings: state.embBuf!)
+//            let embMatrix  = MPSMatrix(buffer: embeddings, descriptor: MPSMatrixDescriptor(rows: tokens.count,
+//                                                                                           columns: model.dModel,
+//                                                                                           rowBytes: model.dModel * MemoryLayout<Float32>.stride,
+//                                                                                           dataType: .float32))
+//            let embTnData = MPSGraphTensorData(embMatrix)
+//            let embPlaceh = graph.placeholder(shape: embTnData.shape, dataType: .float32, name: "embPlaceh")
+//            let operands = state.layers.map { layerState in MambaBlockOperand(state: layerState, graph: graph) }
+//            var xp: MPSGraphTensor = embPlaceh
+//            var x: MPSGraphTensorData = embTnData
+//            let margs    = MambaArgs()
+//            for layer in operands {
+//                let norm  = graph.rmsNorm(xp, weights: layer.norm.key)
+//                // .shape: (l, d)
+//                guard let l = norm.shape?[0], let _ = norm.shape?[1] else {
+//                    throw MambaError.invalidParameterShape("mamba/norm@\(layer.index)")
+//                }
+//                
+//                /// Projection of shape (l, 2(dInner)), where left is x and right is residual
+//                let normAndRes = graph.matrixMultiplication(primary: norm,
+//                                                            secondary: graph.transposeTensor(layer.inProj.key,
+//                                                                                             dimension: 0,
+//                                                                                             withDimension: 1,
+//                                                                                             name: "mamba:normAndRes.transpose@\(layer.index)"),
+//                                                            name: "mamba:normAndRes.matmul@\(layer.index)")
+//                
+//                let normrSplit = graph.split(normAndRes, splitSizes: [margs.dInner, margs.dInner], axis: -1, name: "mamba:normrSplit.split@\(layer.index)")
+//                let x2   = normrSplit[0] // (l, dInner)
+//                let res = normrSplit[1] // (l, dInner)
+//                
+//                let results = try genToselScan(graph,
+//                                               model: model,
+//                                               device: device,
+//                                               state: state,
+//                                               inTokens: tokens,
+//                                               layer: layer,
+//                                               x2: x2,
+//                                               res: res,
+//                                               l: l,
+//                                               xp: xp,
+//                                               x: x,
+//                                               margs: margs
+//                )
+//                
+//                let nextCmdBuf = q.makeCommandBuffer()!
+//                let und = results[0].mpsndarray()
+//                let spdnd = results[1].mpsndarray()
+//                let and = results[2].mpsndarray()
+//                let bnd = results[3].mpsndarray()
+//                let cnd = results[4].mpsndarray()
+//                let dnd = results[5].mpsndarray()
+//                var u = device.makeBuffer(length: und.resourceSize())!
+//                var spd = device.makeBuffer(length: spdnd.resourceSize())!
+//                var a = device.makeBuffer(length: and.resourceSize())!
+//                var b = device.makeBuffer(length: bnd.resourceSize())!
+//                var c = device.makeBuffer(length: cnd.resourceSize())!
+//                var d = device.makeBuffer(length: dnd.resourceSize())!
+//                und.exportData(with: nextCmdBuf, to: u, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                spdnd.exportData(with: nextCmdBuf, to: spd, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                and.exportData(with: nextCmdBuf, to: a, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                bnd.exportData(with: nextCmdBuf, to: b, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                cnd.exportData(with: nextCmdBuf, to: c, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                dnd.exportData(with: nextCmdBuf, to: d, destinationDataType: .float32, offset: 0, rowStrides: nil)
+//                nextCmdBuf.commit()
+//                nextCmdBuf.waitUntilCompleted()
+//                
+//                let selScanFn = library.makeFunction(name: "selectiveScan")!
+//                let computePipelineState = try device.makeComputePipelineState(function: selScanFn)
+//                var dInner = UInt32(1536)
+//                var dState = UInt32(16)
+//                let seqLen = UInt32(tokens.count)
+//                let outBufSize = dInner * seqLen
+//                let outByteCount = Int(outBufSize) * MemoryLayout<Float32>.stride
+//                let outBuf = device.makeBuffer(length: outByteCount)
+//                var output = [Float]()
+//                
+//                let xBufSize = dInner * (dState / 4)
+//                let xByteCount = Int(xBufSize) * MemoryLayout<SIMD4<Float>>.stride
+//                var xBuf = device.makeBuffer(length: xByteCount)
+//                
+//                let dInnerB = device.makeBuffer(bytes: &dInner, length: MemoryLayout<UInt32>.stride)
+//                let dStateB = device.makeBuffer(bytes: &dState, length: MemoryLayout<UInt32>.stride)
+//                
+//                //            withDebugCapture(on: device, execute:  {
+//                var computeCmdBuf = q.makeCommandBuffer()!
+//                var computeEncoder = computeCmdBuf.makeComputeCommandEncoder(dispatchType: .serial)!
+//                computeEncoder.setComputePipelineState(computePipelineState)
+//                
+//                var loopIndices: [UInt32] = [0, 1]
+//                let liB = device.makeBuffer(bytes: &loopIndices, length: loopIndices.count * MemoryLayout<UInt32>.stride)
+//                computeEncoder.setBuffer(u,  offset: 0, index: 0)
+//                computeEncoder.setBuffer(spd,  offset: 0, index: 1)
+//                computeEncoder.setBuffer(a,  offset: 0, index: 2)
+//                computeEncoder.setBuffer(b,  offset: 0, index: 3)
+//                computeEncoder.setBuffer(c,  offset: 0, index: 4)
+//                computeEncoder.setBuffer(d,  offset: 0, index: 5)
+//                computeEncoder.setBuffer(liB,  offset: 0, index: 6)
+//                computeEncoder.setBuffer(dInnerB,  offset: 0, index: 7)
+//                computeEncoder.setBuffer(dStateB,  offset: 0, index: 8)
+//                computeEncoder.setBuffer(xBuf,    offset: 0, index: 9)
+//                computeEncoder.setBuffer(outBuf,  offset: 0, index: 10)
+//                
+//                for li in loopIndices.map({Int($0)}) {
+//                    computeEncoder.setBufferOffset(4 * li * Int(dInner), index: 0)
+//                    computeEncoder.setBufferOffset(4 * li * Int(dInner), index: 1)
+//                    computeEncoder.setBufferOffset(4 * li * Int(dState), index: 3)
+//                    computeEncoder.setBufferOffset(4 * li * Int(dState), index: 4)
+//                    computeEncoder.setBufferOffset(4 * li, index: 6)
+//                    let h = computePipelineState.threadExecutionWidth
+//                    let w = 1
+//                    let threadsPerThreadgroup = MTLSizeMake(w, h, 1)
+//                    let threadsPerGrid = MTLSize(width: Int(dInner), height: Int(dState), depth: 1)
+//                    computeEncoder.dispatchThreads(threadsPerGrid, threadsPerThreadgroup: threadsPerThreadgroup)
+//                }
+//                
+//                computeEncoder.endEncoding()
+//                computeCmdBuf.commit()
+//                computeCmdBuf.waitUntilCompleted()
+//                //            })
+//                
+//                let yPlaceholder = graph.placeholder(shape: [NSNumber(value: seqLen), NSNumber(value: dInner)], dataType: .float32, name: "yPlaceh")
+//                let yTensorData = MPSGraphTensorData(outBuf!, shape: [NSNumber(value: seqLen), NSNumber(value: dInner)], dataType: .float32)
+//                
+//                let yup = graph.multiplication(yPlaceholder, graph.silu(res), name:nil)
+//                
+//                
+//                /// Projection of shape (l, 2(dInner)), where left is x and right is residual
+//                let hmmmm = graph.matrixMultiplication(primary: yup,
+//                                                       secondary: graph.transposeTensor(layer.outProj.key,
+//                                                                                        dimension: 0,
+//                                                                                        withDimension: 1,
+//                                                                                        name: "mamba:output.transpose@\(layer.index)"),
+//                                                       name: "mamba:output.matmul@\(layer.index)")
+//                
+//                let residual = graph.addition(hmmmm, xp, name: "residual:+@\(layer.index)")
+//                let layerResults = graph.run(feeds: [yPlaceholder:yTensorData,
+//                                                        xp:x
+//                                                    ].merging(operands.flatMap({$0.feeds}), uniquingKeysWith: {$1}),
+//                                             targetTensors: [residual],
+//                                             targetOperations: nil)
+//                x = layerResults[residual]!
+//            }
+//            
+//            let vocEmbP = graph.placeholder(shape: state.embeddings.shape, dataType: .float32, name: "vocEmbP")
+//            let normFPlaceholder  = graph.placeholder(shape: state.normF.shape, dataType: .float32, name: "normFP")
+//            let laysors = graph.placeholder(shape: [NSNumber(value:tokens.count),NSNumber(value: model.dModel)], name: nil)
+//            let normFoo = graph.rmsNorm(laysors, weights: normFPlaceholder)
+//            let logits  = graph.matrixMultiplication(primary: normFoo,
+//                                                     secondary: graph.transposeTensor(vocEmbP, dimension: 0, withDimension:1, name: "logits.transpose"),
+//                                                     name: "logits.matmul")
+//            let probs   = graph.softMax(with:
+//                                        graph.sliceTensor(logits,
+//                                                          dimension: 0,
+//                                                          start: Int(truncating: logits.shape![0]) - 1,
+//                                                          length: 1,
+//                                                          name:nil),
+//                                      axis: -1,
+//                                      name: nil)
+//            
+//            print("Sampling...")
+//            let results = graph.run(
+//                feeds: [laysors:x,
+//                        vocEmbP:state.embeddings,
+//                        normFPlaceholder:state.normF,
+//                       ].merging(operands.flatMap({$0.feeds}), uniquingKeysWith: {$1}),
+//                targetTensors: [probs],
+//                targetOperations: nil
+//            )
+//            
+//            peekFloatTensorFloats(results[probs])
+//            let arr = results[probs]!.mpsndarray()
+//            let totalSize = (0..<arr.numberOfDimensions)
+//                .reduce(into: 1, {$0 *= arr.length(ofDimension: $1)})
+//            
+//            
+//            var values: [Float32] = .init(repeating: -42.0, count: totalSize)
+//            arr.readBytes(&values, strideBytes: nil)
+//            var tokenProbs: [(Int, Float32)] = Array(values.enumerated()
+//                .map{ (i, v) in v.isNaN ? (i, 0) : (i, v) }
+//                .sorted(by: {$0.1 > $1.1})
+//                .prefix(40))
+//            
+//            
+//            // Sum of all probabilities (so that we don't have to require that the sum is 1.0):
+//            let sum = tokenProbs.reduce(0, {(a, v) in a + v.1})
+//            // Random number in the range 0.0 <= rnd < sum :
+//            let rnd = Float32.random(in: 0.0 ..< sum)
+//            var choose = tokenProbs.count - 1
+//            
+//            // Find the first interval of accumulated probabilities into which `rnd` falls:
+//            var accum: Float32 = 0.0
+//            for (i, p) in tokenProbs.enumerated() {
+//                accum += p.1
+//                if rnd < accum {
+//                    choose = i
+//                    break
+//                }
+//            }
+//            let choice = tokenProbs[choose].0
+//            tokens = tokens + [Int32(choice)]
+//            print(tokenizer.unTokenize(tokens))
+//        }
         print("Done")
     }
     
@@ -764,14 +807,14 @@ public class MambaMPSGraph: MPSGraph {
 }
 
 public class MambaRunner {
-    public let state: MambaState
+    public let state: MamBufLoSoldier
     public let dModel: Int = 768
     public let nVocab: Int = 50280
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
     public let library: MTLLibrary
     
-    public init(state: MambaState, device: MTLDevice, cmdQ: MTLCommandQueue, library: MTLLibrary) {
+    public init(state: MamBufLoSoldier, device: MTLDevice, cmdQ: MTLCommandQueue, library: MTLLibrary) {
         self.state = state
         self.commandQueue = cmdQ
         self.device = device
@@ -833,7 +876,10 @@ public class MambaRunner {
         print("Yarg")
     }
     
-    public func embed(_ tokenIds: [Int32], embeddings: MTLBuffer) throws -> MTLBuffer {
+    public func embed(_ tokenIds: [Int32]) throws -> MTLBuffer {
+        guard let embeddings = state.base["embedding.weight"]?.data else {
+            throw MambaError.missingData("embedding")
+        }
         let seqLen: UInt32 = UInt32(tokenIds.count)
         
         let nVb = try scalarBuffer(UInt32(nVocab))

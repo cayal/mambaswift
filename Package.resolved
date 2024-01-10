@@ -9,6 +9,14 @@
       }
     },
     {
+      "identity" : "mambuflo",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cayal/mambuflo",
+      "state" : {
+        "revision" : "09d7f73616aa81b5028fd578c1e04bcb1186bde6"
+      }
+    },
+    {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-argument-parser.git",

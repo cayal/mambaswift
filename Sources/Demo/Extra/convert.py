@@ -4,6 +4,7 @@ import torch
 import json
 import os
 import sys
+from pathlib import Path
 
 
 def dissect(pretrained_model_name: str):
@@ -45,30 +46,17 @@ def main():
         model_name = sys.argv[1] 
         print(f"Model to convert: {model_name}")
 
-        def maybe_get(lst, idx):
-            try:
-                return lst[idx]
-            except IndexError:
-                return None
-
         state_dict = dissect(f'state-spaces/{model_name}')
         lens = []
         for key in state_dict:
-            parts = key.split('.')
             lens.append(len(state_dict[key].size()))
-            foldername = model_name +"/"+ key
+            foldername = Path(os.path.dirname(__file__)).parents[0] / "Resources" / "converted" / model_name / key
             os.makedirs(foldername, exist_ok=True)
             data  = state_dict[key]
-            shape = data.shape
-            class_name = parts[0]
-            np_data = data.numpy()
+            np_data = data.numpy().astype('f2', order='C')
             metadata = {
-                'category': class_name,
-                'index': '' if class_name != 'layers' else parts[1],
-                'role': '' if class_name != 'layers' else parts[2],
-                'kernel': '' if class_name != 'layers' or maybe_get(parts, 2) == "norm" else parts[3],
-                'type': parts[-1],
-                'shape': shape,
+                'key': key,
+                'shape': data.shape,
                 'stride': data.stride()
             }
 

@@ -6,3 +6,5 @@ DerivedData/
 .netrc
 .swiftpm/
 Sources/Demo/Extra/mamba-*
+Sources/Demo/Resources/converted/*
+.vscode/
