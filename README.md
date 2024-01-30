@@ -2,7 +2,7 @@
 ## About
 Demonstration of inferencing Albert Gu and Tri Dao's pretrained Mamba models using Apple's MPSGraph.
 
-Also, shoutout to [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal), without which people like me would never be able to delve into these topics. I rag on the slow performance of my code, but I could only implement it at all thanks to that implementation's translation and annotation work.
+Based on [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal), 
 
 Usage: 
 ```
@@ -19,19 +19,19 @@ $ ["My", " name", " is", " Tina", " Lloyd"]
 ```
 
 ## Features
-1) Technically speaking, it works
+1) MPSGraph based inference of `state-spaces/mamba[xxx]` series of models
+2) Swift based tokenization
 
-## Performance
-* Nonexistent, so be patient and have boatloads of RAM ready while waiting for tokens
-* I apologize to the authors, it's entirely unrelated to the Mamba architecture
-* This is the worst-performing code I've ever written
-* It gives me the impression that I'm doing something wrong
-* OTOH Apple Thinks Different™ by providing no real documentation to developers
-* I'm also not skilled enough to do a heroic reverse-engineering effort like [this](https://github.com/hollance/neural-engine)
-* So I can sleep easy at night in the Code Gulag knowing that nothing could be done to prevent this outcome, and knowing my children and children's children will be mercifully banned from the horrors of programming for 800 years
+## Caveats
+* Using MPSGraph breaks down on the SSM scan step due to MPSGraph's lack of control over buffer allocation
+* As a result, the CPU burns frankly incredible amounts of RAM and flops before being able to dispatch to the GPU
+* I'm not sure if there's a way to fix performance using MPSGraph
+
+## `chaos`
+* Branch for rewriting the entire inference pipeline in a series of Metal compute kernels
+* New approach will use heap allocation and a separate scratch heap for each inference context
 
 ## TODO
-* Improve performance
-* Learn to program the GPU directly
-* Maybe drop MPSGraph
-* Maybe switch careers
+* Make chaos branch build: Swift Package will need a prebuild script for shared C/Swift header and the metal source
+* Investigate data races in the earlier-coded pipeline steps now that I'm somewhat familiar with Metal
+* Integrate chaos runner after data races definitely gone
