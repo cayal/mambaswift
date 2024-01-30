@@ -39,7 +39,7 @@ def dissect(pretrained_model_name: str):
 
 
 def main():
-    if len(sys.argv) < 1:
+    if len(sys.argv) < 2:
         print("Please provide one of: mamba-130m, mamba-370m, mamba-790m, mamba-1.4b, mamba-2.8b.")
         return -1
     else:
@@ -57,7 +57,8 @@ def main():
             metadata = {
                 'key': key,
                 'shape': data.shape,
-                'stride': data.stride()
+                'stride': data.stride(),
+                'is16bit': True
             }
 
             bytes = np_data.tobytes()

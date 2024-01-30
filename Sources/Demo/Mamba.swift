@@ -49,9 +49,6 @@ struct Mamba: ParsableCommand {
         }
         let library = try device.makeLibrary(URL: bundleURL)
         
-        var lmHeadMat: MPSMatrix? = nil
-        var embBuf: MTLBuffer? = nil
-        
         let furl = try folderUrl ?? {
             print("No folder url specified, looking for converted models...")
             guard let convertedModelsPath = Bundle.module.url(forResource: "converted", withExtension: nil)?.path,
@@ -123,12 +120,8 @@ struct Mamba: ParsableCommand {
         
         
         
-        var state = try MBL.complete(device: device, cmdQ: q)
+        let state = try MBL.complete(device: device, cmdQ: q)
         let model = MambaRunner(state: state, device: device, cmdQ: q, library: library)
-        
-//        var state = try MB.validated()
-//        state.embBuf = embBuf!
-//        let graph = MambaMPSGraph()
                 
         print("Prompt: \(promptText)")
         
@@ -136,13 +129,13 @@ struct Mamba: ParsableCommand {
         let specialTokensMapPath = Bundle.module.url(forResource:"special_tokens_map", withExtension:"json")
         let tokenizerPath = Bundle.module.url(forResource:"tokenizer", withExtension:"json")
         let tokenizer = try BPETokenizer(pathToTokenizerConfig: tokenizerPath!, pathToSpecialTokensMap: specialTokensMapPath!)
-        var tokens: [Int32] = tokenizer.tokenize(promptText).map { Int32($0.tokenId) }
-        var embeddings = try model.embed(tokens)
+        let tokens: [Int32] = tokenizer.tokenize(promptText).map { Int32($0.tokenId) }
+        let embeddings = try model.embed(tokens)
         
         cmdBuf.commit()
         var embOut: [Float16] = []
-        let dataPointer = embeddings.contents().bindMemory(to: Float16.self, capacity: embeddings.length)
-        let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: embeddings.length)
+        let dataPointer = embeddings.contents().bindMemory(to: Float16.self, capacity: embeddings.length / MemoryLayout<Float16>.stride)
+        let bufferPointer = UnsafeBufferPointer(start: dataPointer, count: embeddings.length / MemoryLayout<Float16>.stride)
         bufferPointer.forEach { value in embOut.append(value) }
         print(embOut)
 
@@ -894,10 +887,8 @@ public class MambaRunner {
         let commandBuffer = commandQueue.makeCommandBuffer()!
         
         let outBufSize = tokenIds.count * Int(dModel)
-        let outByteCount = outBufSize * MemoryLayout<Float32>.stride
+        let outByteCount = outBufSize * MemoryLayout<Float16>.stride
         let outBuf = device.makeBuffer(length: outByteCount)
-        var output = [Float]()
-        
         
         guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else { throw MambaError.failedToMakeCommandEncoder }
         computeEncoder.setComputePipelineState(computePipelineState)
